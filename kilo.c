@@ -39,6 +39,7 @@
 #endif
 
 #include "console.h"
+#include "file.h"
 
 #ifndef SERIALIO
 #include <termios.h>
@@ -887,6 +888,18 @@ int editorOpen(char *filename) {
 int editorSave(void) {
     int len;
     char *buf = editorRowsToString(&len);
+#ifdef SDCARD
+    if (0 == file_save(E.filename, buf)) {
+      free(buf);
+      E.dirty = 0;
+      editorSetStatusMessage("%d bytes written on disk", len);
+      return 0;
+    }
+    else {
+      editorSetStatusMessage("Can't save! I/O error");
+      return 1;
+    }
+#else
     int fd = open(E.filename,O_RDWR|O_CREAT,0644);
     if (fd == -1) goto writeerr;
 
@@ -906,6 +919,7 @@ writeerr:
     if (fd != -1) close(fd);
     editorSetStatusMessage("Can't save! I/O error: %s",strerror(errno));
     return 1;
+#endif
 }
 
 /* ============================= Terminal update ============================ */
@@ -1379,7 +1393,9 @@ int KILO_MAIN(int argc, char **argv) {
     editorSelectSyntaxHighlight(argv[1]);
 #endif
     editorOpen(argv[1]);
+#ifndef SERIALIO
     enableRawMode(STDIN_FILENO);
+#endif
     editorSetStatusMessage(
         "HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
     while(1) {
