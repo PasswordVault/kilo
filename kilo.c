@@ -38,7 +38,11 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+#include "console.h"
+
+#ifndef SERIALIO
 #include <termios.h>
+#endif
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -47,13 +51,18 @@
 #include <ctype.h>
 #include <time.h>
 #include <sys/types.h>
+#ifndef SERIALIO
 #include <sys/ioctl.h>
+#endif
 #include <sys/time.h>
 #include <unistd.h>
 #include <stdarg.h>
 #include <fcntl.h>
 #include <signal.h>
 
+#undef HIGHLIGHT_SYNTAX
+
+#ifdef HIGHLIGHT_SYNTAX
 /* Syntax highlight types */
 #define HL_NORMAL 0
 #define HL_NONPRINT 1
@@ -76,6 +85,7 @@ struct editorSyntax {
     char multiline_comment_end[3];
     int flags;
 };
+#endif
 
 /* This structure represents a single line of the file we are editing. */
 typedef struct erow {
@@ -84,14 +94,18 @@ typedef struct erow {
     int rsize;          /* Size of the rendered row. */
     char *chars;        /* Row content. */
     char *render;       /* Row content "rendered" for screen (for TABs). */
+#ifdef HIGHLIGHT_SYNTAX
     unsigned char *hl;  /* Syntax highlight type for each character in render.*/
     int hl_oc;          /* Row had open comment at end in last syntax highlight
                            check. */
+#endif
 } erow;
 
+#ifdef HIGHLIGHT_SYNTAX
 typedef struct hlcolor {
     int r,g,b;
 } hlcolor;
+#endif
 
 struct editorConfig {
     int cx,cy;  /* Cursor x and y position in characters */
@@ -106,7 +120,9 @@ struct editorConfig {
     char *filename; /* Currently open filename */
     char statusmsg[80];
     time_t statusmsg_time;
+#ifdef HIGHLIGHT_SYNTAX
     struct editorSyntax *syntax;    /* Current syntax highlight, or NULL. */
+#endif
 };
 
 static struct editorConfig E;
@@ -140,6 +156,7 @@ enum KEY_ACTION{
 
 void editorSetStatusMessage(const char *fmt, ...);
 
+#ifdef HIGHLIGHT_SYNTAX
 /* =========================== Syntax highlights DB =========================
  *
  * In order to add a new syntax, define two arrays with a list of file name
@@ -196,9 +213,10 @@ struct editorSyntax HLDB[] = {
 };
 
 #define HLDB_ENTRIES (sizeof(HLDB)/sizeof(HLDB[0]))
+#endif
 
 /* ======================= Low level terminal handling ====================== */
-
+#ifndef SERIALIO
 static struct termios orig_termios; /* In order to restore at exit.*/
 
 void disableRawMode(int fd) {
@@ -208,12 +226,16 @@ void disableRawMode(int fd) {
         E.rawmode = 0;
     }
 }
+#endif
 
 /* Called at exit to avoid remaining in raw mode. */
 void editorAtExit(void) {
+#ifndef SERIALIO
     disableRawMode(STDIN_FILENO);
+#endif
 }
 
+#ifndef SERIALIO
 /* Raw mode: 1960 magic shit. */
 int enableRawMode(int fd) {
     struct termios raw;
@@ -247,27 +269,42 @@ fatal:
     errno = ENOTTY;
     return -1;
 }
+#endif
 
 /* Read a key from the terminal put in raw mode, trying to handle
  * escape sequences. */
 int editorReadKey(int fd) {
     int nread;
     char c, seq[3];
+#ifdef SERIALIO
+    nread = 1;
+    while ((c = con_getchar()) == -1);
+#else
     while ((nread = read(fd,&c,1)) == 0);
+#endif
     if (nread == -1) exit(1);
 
     while(1) {
         switch(c) {
         case ESC:    /* escape sequence */
             /* If this is just an ESC, we'll timeout here. */
+#ifdef SERIALIO
+            if ((*seq = con_getchar()) == -1) return ESC;
+            if ((*(seq+1) = con_getchar()) == -1) return ESC;
+#else
             if (read(fd,seq,1) == 0) return ESC;
             if (read(fd,seq+1,1) == 0) return ESC;
+#endif
 
             /* ESC [ sequences. */
             if (seq[0] == '[') {
                 if (seq[1] >= '0' && seq[1] <= '9') {
                     /* Extended escape, read additional byte. */
+#ifdef SERIALIO
+                    if ((*(seq+2) = con_getchar()) == -1) return ESC;
+#else
                     if (read(fd,seq+2,1) == 0) return ESC;
+#endif
                     if (seq[2] == '~') {
                         switch(seq[1]) {
                         case '3': return DEL_KEY;
@@ -305,6 +342,9 @@ int editorReadKey(int fd) {
  * and return it. On error -1 is returned, on success the position of the
  * cursor is stored at *rows and *cols and 0 is returned. */
 int getCursorPosition(int ifd, int ofd, int *rows, int *cols) {
+#ifdef SERIALIO
+    return con_get_cursor_position(rows, cols);
+#else
     char buf[32];
     unsigned int i = 0;
 
@@ -323,12 +363,16 @@ int getCursorPosition(int ifd, int ofd, int *rows, int *cols) {
     if (buf[0] != ESC || buf[1] != '[') return -1;
     if (sscanf(buf+2,"%d;%d",rows,cols) != 2) return -1;
     return 0;
+#endif
 }
 
 /* Try to get the number of columns in the current terminal. If the ioctl()
  * call fails the function will try to query the terminal itself.
  * Returns 0 on success, -1 on error. */
 int getWindowSize(int ifd, int ofd, int *rows, int *cols) {
+#ifdef SERIALIO
+    return con_get_window_size(rows, cols);
+#else
     struct winsize ws;
 
     if (ioctl(1, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
@@ -359,8 +403,10 @@ int getWindowSize(int ifd, int ofd, int *rows, int *cols) {
 
 failed:
     return -1;
+#endif
 }
 
+#ifdef HIGHLIGHT_SYNTAX
 /* ====================== Syntax highlight color scheme  ==================== */
 
 int is_separator(int c) {
@@ -549,6 +595,7 @@ void editorSelectSyntaxHighlight(char *filename) {
         }
     }
 }
+#endif
 
 /* ======================= Editor rows implementation ======================= */
 
@@ -583,8 +630,10 @@ void editorUpdateRow(erow *row) {
     row->rsize = idx;
     row->render[idx] = '\0';
 
+#ifdef HIGHLIGHT_SYNTAX
     /* Update the syntax highlighting attributes of the row. */
     editorUpdateSyntax(row);
+#endif
 }
 
 /* Insert a row at the specified position, shifting the other rows on the bottom
@@ -599,8 +648,10 @@ void editorInsertRow(int at, char *s, size_t len) {
     E.row[at].size = len;
     E.row[at].chars = malloc(len+1);
     memcpy(E.row[at].chars,s,len+1);
+#ifdef HIGHLIGHT_SYNTAX
     E.row[at].hl = NULL;
     E.row[at].hl_oc = 0;
+#endif
     E.row[at].render = NULL;
     E.row[at].rsize = 0;
     E.row[at].idx = at;
@@ -613,7 +664,9 @@ void editorInsertRow(int at, char *s, size_t len) {
 void editorFreeRow(erow *row) {
     free(row->render);
     free(row->chars);
+#ifdef HIGHLIGHT_SYNTAX
     free(row->hl);
+#endif
 }
 
 /* Remove the row at the specified position, shifting the remainign on the
@@ -815,7 +868,11 @@ int editorOpen(char *filename) {
     char *line = NULL;
     size_t linecap = 0;
     ssize_t linelen;
+#ifdef SERIALIO
+    while((linelen = con_getline(&line)) != -1) {
+#else
     while((linelen = getline(&line,&linecap,fp)) != -1) {
+#endif
         if (linelen && (line[linelen-1] == '\n' || line[linelen-1] == '\r'))
             line[--linelen] = '\0';
         editorInsertRow(E.numrows,line,linelen);
@@ -911,13 +968,18 @@ void editorRefreshScreen(void) {
         r = &E.row[filerow];
 
         int len = r->rsize - E.coloff;
+#ifdef HIGHLIGHT_SYNTAX
         int current_color = -1;
+#endif
         if (len > 0) {
             if (len > E.screencols) len = E.screencols;
             char *c = r->render+E.coloff;
+#ifdef HIGHLIGHT_SYNTAX
             unsigned char *hl = r->hl+E.coloff;
+#endif
             int j;
             for (j = 0; j < len; j++) {
+#ifdef HIGHLIGHT_SYNTAX
                 if (hl[j] == HL_NONPRINT) {
                     char sym;
                     abAppend(&ab,"\x1b[7m",4);
@@ -943,6 +1005,9 @@ void editorRefreshScreen(void) {
                     }
                     abAppend(&ab,c+j,1);
                 }
+#else
+                abAppend(&ab,c+j,1);
+#endif
             }
         }
         abAppend(&ab,"\x1b[39m",5);
@@ -1016,8 +1081,10 @@ void editorFind(int fd) {
     int qlen = 0;
     int last_match = -1; /* Last line where a match was found. -1 for none. */
     int find_next = 0; /* if 1 search next, if -1 search prev. */
+#ifdef HIGHLIGHT_SYNTAX
     int saved_hl_line = -1;  /* No saved HL */
     char *saved_hl = NULL;
+#endif
 
 #define FIND_RESTORE_HL do { \
     if (saved_hl) { \
@@ -1045,7 +1112,9 @@ void editorFind(int fd) {
                 E.cx = saved_cx; E.cy = saved_cy;
                 E.coloff = saved_coloff; E.rowoff = saved_rowoff;
             }
+#ifdef HIGHLIGHT_SYNTAX
             FIND_RESTORE_HL;
+#endif
             editorSetStatusMessage("");
             return;
         } else if (c == ARROW_RIGHT || c == ARROW_DOWN) {
@@ -1079,18 +1148,24 @@ void editorFind(int fd) {
             }
             find_next = 0;
 
+#ifdef HIGHLIGHT_SYNTAX
             /* Highlight */
             FIND_RESTORE_HL;
+#endif
 
             if (match) {
+#ifdef HIGHLIGHT_SYNTAX
                 erow *row = &E.row[current];
+#endif
                 last_match = current;
+#ifdef HIGHLIGHT_SYNTAX
                 if (row->hl) {
                     saved_hl_line = current;
                     saved_hl = malloc(row->rsize);
                     memcpy(saved_hl,row->hl,row->rsize);
                     memset(row->hl+match_offset,HL_MATCH,qlen);
                 }
+#endif
                 E.cy = 0;
                 E.cx = match_offset;
                 E.rowoff = current;
@@ -1283,19 +1358,26 @@ void initEditor(void) {
     E.row = NULL;
     E.dirty = 0;
     E.filename = NULL;
+#ifdef HIGHLIGHT_SYNTAX
     E.syntax = NULL;
+#endif
     updateWindowSize();
     signal(SIGWINCH, handleSigWinCh);
 }
 
-int main(int argc, char **argv) {
+#ifndef KILO_MAIN
+# define KILO_MAIN main
+#endif
+int KILO_MAIN(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr,"Usage: kilo <filename>\n");
         exit(1);
     }
 
     initEditor();
+#ifdef HIGHLIGHT_SYNTAX
     editorSelectSyntaxHighlight(argv[1]);
+#endif
     editorOpen(argv[1]);
     enableRawMode(STDIN_FILENO);
     editorSetStatusMessage(
